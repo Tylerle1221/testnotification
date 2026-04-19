@@ -83,6 +83,29 @@ class BasePlatformScraper(ABC):
         """Log into the platform. Must be implemented per platform."""
         pass
 
+    async def login_with_retry(self, max_attempts: int = 2) -> bool:
+        """Calls login() up to max_attempts times. Returns True on first success."""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if await self.login():
+                    return True
+                if attempt < max_attempts:
+                    logger.warning(f"[{self.PLATFORM_NAME}] Login attempt {attempt} failed, retrying in 5s...")
+                    # Reload the page before retrying
+                    await asyncio.sleep(5)
+                    if self.page:
+                        try:
+                            await self.page.reload(wait_until="domcontentloaded", timeout=20000)
+                            await asyncio.sleep(3)
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.error(f"[{self.PLATFORM_NAME}] Login attempt {attempt} error: {e}")
+                if attempt < max_attempts:
+                    await asyncio.sleep(5)
+        logger.error(f"[{self.PLATFORM_NAME}] All {max_attempts} login attempts failed")
+        return False
+
     @abstractmethod
     async def search_bets(self, bet: dict) -> list[dict]:
         """

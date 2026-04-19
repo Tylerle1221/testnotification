@@ -122,7 +122,7 @@ async def search_bet_on_platforms(
             if not await scraper.start():
                 console.print(" [red]browser failed[/red]")
                 continue
-            if not await scraper.login():
+            if not await scraper.login_with_retry(max_attempts=2):
                 console.print(" [red]login failed[/red]")
                 state.last_error = f"{scraper.PLATFORM_NAME}: login failed"
                 await notifier.notify_error(scraper.PLATFORM_NAME, "Login failed")

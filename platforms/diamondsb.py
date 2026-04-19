@@ -27,21 +27,21 @@ class DiamondSBScraper(BasePlatformScraper):
         logger.info(f"[{self.PLATFORM_NAME}] Logging in...")
         try:
             await self.safe_goto(self._origin() + "/pla/#/msg")
-            await asyncio.sleep(4)
+            await asyncio.sleep(6)  # Vue.js needs time to initialise on Render
             await self._dismiss_overlays()
 
             # Vue form: first text input = username, #password-field = password
             user_sel = '.signin-form input[type="text"], .signin-form input:not([type="password"])'
             pass_sel = '#password-field, .signin-form input[type="password"]'
 
-            if not await self.safe_fill(user_sel, self.username, timeout=12000):
+            if not await self.safe_fill(user_sel, self.username, timeout=15000):
                 logger.error(f"[{self.PLATFORM_NAME}] Username field not found")
                 return False
             await self.safe_fill(pass_sel, self.password)
             await asyncio.sleep(0.4)
 
-            await self.safe_click('.signin-form button[type="submit"], .signin-form .btn-primary', timeout=6000)
-            await asyncio.sleep(5)
+            await self.safe_click('.signin-form button[type="submit"], .signin-form .btn-primary', timeout=8000)
+            await asyncio.sleep(7)  # wait for Vue router to update
 
             self.is_logged_in = await self._verify_login()
             if self.is_logged_in:
@@ -63,14 +63,27 @@ class DiamondSBScraper(BasePlatformScraper):
                 pass
 
     async def _verify_login(self) -> bool:
+        # 1. Title changes to 'DiamondSB Players' after successful login
+        try:
+            title = await self.page.title()
+            if "Players" in title or "player" in title.lower():
+                return True
+        except Exception:
+            pass
+
+        # 2. URL moves away from the login route
         cur = self.page.url
-        # After login, URL typically changes away from /pla/#/msg
         if "/msg" not in cur:
             return True
-        for sel in ['[class*="balance"]', '[class*="account"]', '.user-balance', '.nav-user']:
-            if await self.wait_for_selector(sel, timeout=2500):
+
+        # 3. Look for post-login navigation elements
+        for sel in ['[class*="balance"]', '[class*="account"]', '.user-balance',
+                    '.nav-user', '[class*="nav"]', '[class*="header"]']:
+            if await self.wait_for_selector(sel, timeout=2000):
                 return True
-        login_gone = not await self.wait_for_selector('.signin-form', timeout=1500)
+
+        # 4. Login form is gone (most reliable fallback)
+        login_gone = not await self.wait_for_selector('.signin-form', timeout=2000)
         return login_gone
 
     async def search_bets(self, bet: dict) -> list[dict]:

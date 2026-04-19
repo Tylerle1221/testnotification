@@ -114,17 +114,21 @@ class Sports411Scraper(BasePlatformScraper):
                 pass
 
     async def _verify_login(self) -> bool:
-        # After login, balance or user info appears; login form disappears
+        # Angular SPA — URL and title don't change on login.
+        # Check: user balance/info appears OR login form disappears.
         for sel in [
             '[class*="balance"]', '[class*="Balance"]',
             '[class*="user-name"]', '[class*="account-menu"]',
-            'button:has-text("Logout")', 'button:has-text("Log Out")',
             '.user-balance', '.header-user',
+            'button:has-text("Logout")', 'button:has-text("Log Out")',
         ]:
             if await self.wait_for_selector(sel, timeout=3000):
                 return True
-        # If login fields are gone, consider logged in
-        return not await self.wait_for_selector('input[name="account"]', timeout=1500)
+        # Most reliable: the login account field is gone after a successful login
+        login_field_gone = not await self.wait_for_selector(
+            'input[name="account"], button.login-enter', timeout=2000
+        )
+        return login_field_gone
 
     async def search_bets(self, bet: dict) -> list[dict]:
         if not self.is_logged_in:
