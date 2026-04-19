@@ -109,6 +109,22 @@ class TelegramNotifier:
         )
         return await self.send_message(message)
 
+    async def notify_new_bets_found(self, bets: list[dict]) -> bool:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"📥 <b>{len(bets)} new open bet(s) detected on ibetcoin.win</b>\n⏰ {timestamp}\n"]
+        for b in bets[:5]:
+            side = b.get("bet_side", "")
+            line = f" {side.upper()} {b.get('line')}" if side and b.get("line") else ""
+            odds = b.get("odds_american") or b.get("odds") or ""
+            lines.append(
+                f"  🎫 #{b.get('ticket_id')} [{b.get('sport','')}] "
+                f"{b.get('event','?')[:50]}{line} @ {odds}"
+            )
+        if len(bets) > 5:
+            lines.append(f"  ...and {len(bets)-5} more")
+        lines.append("\nSearching platforms now...")
+        return await self.send_message("\n".join(lines))
+
     async def test_connection(self) -> bool:
         message = (
             "✅ <b>Bet Finder Agent - Connection Test</b>\n\n"
