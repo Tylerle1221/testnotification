@@ -14,7 +14,7 @@ from typing import Optional
 
 from telegram import Bot, Update
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import Conflict, TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 logger = logging.getLogger(__name__)
@@ -179,6 +179,55 @@ class TelegramNotifier:
         lines.append("\nSearching platforms now...")
         return await self.send_message("\n".join(lines))
 
+    async def notify_bet_search_complete(
+        self,
+        bet: dict,
+        alerts_sent: int,
+        matcher_hits: int,
+        elapsed_sec: float,
+        platforms_searched: list[str],
+    ) -> bool:
+        """Sent after platform search finishes so Telegram is not left at 'Searching...'."""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tid = bet.get("ticket_id", "?")
+        sport = bet.get("sport", "")
+        ev = (bet.get("event") or bet.get("selection") or "?")[:55]
+        pl = ", ".join(platforms_searched) if platforms_searched else "—"
+        if alerts_sent > 0:
+            body = (
+                f"✅ <b>Search finished</b> — ticket <code>#{tid}</code>\n"
+                f"⏰ {ts}  |  ⏱ {elapsed_sec:.1f}s\n"
+                f"🎯 Sent <b>{alerts_sent}</b> match alert(s) — see messages above.\n"
+                f"<i>Platforms: {pl}</i>"
+            )
+        elif matcher_hits > 0:
+            body = (
+                f"ℹ️ <b>Search finished</b> — ticket <code>#{tid}</code>\n"
+                f"⏰ {ts}  |  ⏱ {elapsed_sec:.1f}s\n"
+                f"[{sport}] {ev}\n"
+                f"Found <b>{matcher_hits}</b> candidate line(s) on book(s) but "
+                f"<b>no Telegram alert</b> (e.g. hedge filter, notify toggles, or odds rules).\n"
+                f"<i>Platforms: {pl}</i>"
+            )
+        else:
+            body = (
+                f"ℹ️ <b>Search finished</b> — ticket <code>#{tid}</code>\n"
+                f"⏰ {ts}  |  ⏱ {elapsed_sec:.1f}s\n"
+                f"[{sport}] {ev}\n"
+                f"<b>No matching lines</b> on any monitored book right now "
+                f"(slippage / fuzzy rules may also filter candidates).\n"
+                f"<i>Platforms: {pl}</i>"
+            )
+        return await self.send_message(body)
+
+    async def notify_bet_search_error(self, bet: dict, error: str) -> bool:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tid = bet.get("ticket_id", "?")
+        return await self.send_message(
+            f"⚠️ <b>Search failed</b> — ticket <code>#{tid}</code>\n"
+            f"⏰ {ts}\n<pre>{error[:800]}</pre>"
+        )
+
     async def test_connection(self) -> bool:
         return await self.send_message(
             "✅ <b>Bet Finder Agent - Connected</b>\n\n"
@@ -253,16 +302,29 @@ class TelegramCommandServer:
                 lines.append(f"  ❌ {display_name} — not connected (login failed at startup)")
                 continue
 
-            # Check if the browser session is still alive
+            # During search_bets the page is often navigating — skip fragile checks
+            lock = getattr(pool, "_locks", {}).get(key)
             try:
-                alive = await scraper.is_session_alive()
+                busy = lock.locked() if lock is not None else False
             except Exception:
-                alive = scraper.is_logged_in
+                busy = False
+            if busy:
+                lines.append(f"  ✅ {display_name} — logged in (search in progress)")
+                continue
 
-            if alive:
-                lines.append(f"  ✅ {display_name} — logged in (session active)")
+            # /status must not use page.evaluate — on Render it often false-negatives
+            # (CSP, navigation, cross-origin). Trust login flag + tab still attached.
+            tab_ok = scraper.browser_tab_open()
+            if scraper.is_logged_in and tab_ok:
+                lines.append(f"  ✅ {display_name} — logged in & ready")
+            elif scraper.is_logged_in and not tab_ok:
+                lines.append(
+                    f"  ⚠️ {display_name} — login OK but browser tab missing (restart agent)"
+                )
             else:
-                lines.append(f"  ⚠️ {display_name} — session may have expired (will re-login on next bet)")
+                lines.append(
+                    f"  ⚠️ {display_name} — not logged in (next search will re-login)"
+                )
 
         if self.state.last_error:
             lines += ["", f"⚠️ <b>Last error:</b> {self.state.last_error[:150]}"]
@@ -279,11 +341,22 @@ class TelegramCommandServer:
             "<b>Bet Finder Agent — Commands</b>\n\n"
             "/status — Live health check of all connections\n"
             "/help   — Show this help message\n\n"
-            "The agent polls ibetcoin.win every 5 minutes for new open bets, "
+            "The agent polls ibetcoin.win on a timer for new open bets, "
             "then searches Smash66, DiamondSB, Sports411, and Leftcoast797 "
-            "for matching lines. You get notified here when a match is found.",
+            "for matching lines. You get a message when each search finishes "
+            "and separate alerts when a match is found.",
             parse_mode=ParseMode.HTML
         )
+
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        err = context.error
+        if isinstance(err, Conflict):
+            logger.error(
+                "[Telegram] getUpdates conflict — only one process may poll this bot. "
+                "Stop any second agent (local run, duplicate Render service, or wait for deploy to finish)."
+            )
+            return
+        logger.error("Handler error: %s", err, exc_info=True)
 
     async def start(self):
         """
@@ -298,10 +371,16 @@ class TelegramCommandServer:
         self._app = Application.builder().token(self.bot_token).build()
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
+        self._app.add_error_handler(self._on_error)
 
         await self._app.initialize()
         await self._app.start()
-        await self._app.updater.start_polling(drop_pending_updates=True)
+        # Drop webhook if it was set — mixing webhook + polling causes API errors.
+        await self._app.bot.delete_webhook(drop_pending_updates=True)
+        await self._app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
         logger.info("Telegram command server started (/status /help)")
 
     async def stop(self):

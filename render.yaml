@@ -7,6 +7,11 @@
     buildCommand: pip install -r requirements.txt && playwright install chromium
     startCommand: python main.py
     envVars:
+      # Pin runtime — Render may default to a very new Python where deps break
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "/opt/render/project/src/.playwright-browsers"
       - key: TELEGRAM_BOT_TOKEN
         value: "8630342198:AAFzFz7xgcvPXd6CEmtrn99oXV0g_SSn0q8"
       - key: TELEGRAM_CHAT_ID
@@ -32,6 +37,6 @@
       - key: LEFTCOAST797_PASSWORD
         value: "kk22"
       - key: CHECK_INTERVAL
-        value: "300"
+        value: "60"
       - key: SIMILARITY_THRESHOLD
         value: "75"

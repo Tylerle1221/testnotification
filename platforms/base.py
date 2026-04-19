@@ -162,23 +162,57 @@ class BasePlatformScraper(ABC):
         except Exception as e:
             logger.warning(f"[{self.PLATFORM_NAME}] Screenshot failed: {e}")
 
-    async def is_session_alive(self) -> bool:
-        """
-        Quick check: is the current browser session still logged in?
-        Returns False if the page shows a login form or the browser is dead.
-        """
-        if not self.is_logged_in or not self.page:
-            return False
+    def browser_tab_open(self) -> bool:
+        """True if Playwright browser + page exist and the tab is not closed (no JS eval)."""
         try:
-            url = self.page.url
-            # If we're already on a login page, session is dead
-            if any(kw in url.lower() for kw in ["login", "default.aspx", "expired", "signout"]):
-                return False
-            # Quick JS eval to confirm page is alive
-            await self.page.evaluate("() => document.title", timeout=3000)
-            return True
+            return bool(
+                self.browser
+                and self.context
+                and self.page
+                and not self.page.is_closed()
+            )
         except Exception:
             return False
+
+    def _url_suggests_login_wall(self, url: str) -> bool:
+        """Narrow checks only — avoid substrings like 'expired' inside 'unexpired' / 'expires_in'."""
+        u = url.lower()
+        if "#/login" in u or u.rstrip("/").endswith("/login"):
+            return True
+        if "expired=true" in u or "session=expired" in u or "sessionexpired" in u:
+            return True
+        if "signout=true" in u or "/signout" in u or "/logout" in u:
+            return True
+        return False
+
+    async def is_session_alive(self) -> bool:
+        """
+        Quick check: browser usable and we still believe we're logged in.
+        Avoids broad URL substring heuristics that false-negative SPA URLs.
+        """
+        if not self.is_logged_in:
+            return False
+        if not self.browser or not self.page:
+            return False
+        try:
+            if self.page.is_closed():
+                return False
+        except Exception:
+            return False
+        try:
+            if self._url_suggests_login_wall(self.page.url):
+                return False
+        except Exception:
+            pass
+        try:
+            await self.page.evaluate("() => document.readyState", timeout=8000)
+            return True
+        except Exception:
+            # Often fails while search_bets is navigating — page is not closed, session likely fine
+            try:
+                return not self.page.is_closed()
+            except Exception:
+                return False
 
     def normalize_odds(self, raw: str) -> Optional[float]:
         """Convert odds string (decimal, fractional, american) to decimal float.

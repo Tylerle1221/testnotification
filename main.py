@@ -127,11 +127,13 @@ async def process_bet(
     all_open_bets: list[dict],
     state: AgentState,
     cfg: dict,
-) -> int:
+) -> tuple[int, int]:
+    """Returns (matcher_hits, telegram_alerts_sent)."""
     agent_cfg = cfg.get("agent", {})
     notify_exact = agent_cfg.get("notify_on_exact", True)
     notify_similar = agent_cfg.get("notify_on_similar", True)
-    total_matches = 0
+    matcher_hits = 0
+    alerts_sent = 0
 
     side_str = ""
     if bet.get("bet_side") and bet.get("line"):
@@ -156,8 +158,7 @@ async def process_bet(
         console.print(f"  [{platform_name}] {len(candidates)} candidates → [yellow]{len(matches)} matches[/yellow]")
 
         for match in matches:
-            total_matches += 1
-            state.total_matches_found += 1
+            matcher_hits += 1
             score = match["similarity_score"]
 
             if is_hedge(all_open_bets, match, same_account=True):
@@ -172,10 +173,14 @@ async def process_bet(
 
             if match["is_exact"] and notify_exact:
                 await notifier.notify_exact_match(platform_name, bet, match)
+                state.total_matches_found += 1
+                alerts_sent += 1
             elif match["is_similar"] and not match["is_exact"] and notify_similar:
                 await notifier.notify_similar_match(platform_name, bet, match, score)
+                state.total_matches_found += 1
+                alerts_sent += 1
 
-    return total_matches
+    return matcher_hits, alerts_sent
 
 
 # ─── Main loop ────────────────────────────────────────────────────────────────
@@ -227,13 +232,27 @@ async def polling_loop(
             console.print("[dim]No new bets to process[/dim]")
         else:
             await notifier.notify_new_bets_found(new_bets)
+            searched = pool.platform_names()
 
             for bet in new_bets:
-                found = await process_bet(
-                    bet, pool, notifier, matcher, all_bets, state, config
-                )
-                if found == 0:
+                t_search = time.time()
+                try:
+                    matcher_hits, alerts_sent = await process_bet(
+                        bet, pool, notifier, matcher, all_bets, state, config
+                    )
+                except Exception as e:
+                    err_msg = f"{type(e).__name__}: {e}"
+                    logger.exception("process_bet failed for ticket %s", bet.get("ticket_id"))
+                    state.last_error = err_msg[:500]
+                    await notifier.notify_bet_search_error(bet, err_msg)
+                    continue
+
+                elapsed = time.time() - t_search
+                if matcher_hits == 0:
                     console.print("  [dim]No matches found on any platform[/dim]")
+                await notifier.notify_bet_search_complete(
+                    bet, alerts_sent, matcher_hits, elapsed, searched
+                )
 
         console.print(f"[dim]Next check in {interval}s...[/dim]")
         await asyncio.sleep(interval)
