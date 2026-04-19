@@ -23,6 +23,8 @@ class BasePlatformScraper(ABC):
         self.username = config.get("username", "")
         self.password = config.get("password", "")
         self.url = config.get("url", "")
+        # Optional proxy: {"server": "http://host:port", "username": "...", "password": "..."}
+        self.proxy: Optional[dict] = config.get("proxy")
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -33,7 +35,7 @@ class BasePlatformScraper(ABC):
         """Start the browser and context."""
         try:
             self._playwright = await async_playwright().start()
-            self.browser = await self._playwright.chromium.launch(
+            launch_kwargs = dict(
                 headless=self.headless,
                 args=[
                     "--no-sandbox",
@@ -41,6 +43,9 @@ class BasePlatformScraper(ABC):
                     "--disable-dev-shm-usage",
                 ]
             )
+            if self.proxy:
+                launch_kwargs["proxy"] = self.proxy
+            self.browser = await self._playwright.chromium.launch(**launch_kwargs)
             self.context = await self.browser.new_context(
                 viewport={"width": 1366, "height": 768},
                 user_agent=(
