@@ -33,6 +33,8 @@ class AgentState:
     platforms_enabled: list = field(default_factory=list)
     ibetcoin_url: str = "https://reports.ibetcoin.win/Report/OpenBets.aspx"
     platform_urls: dict = field(default_factory=dict)
+    # Reference to the platform pool — set after pool.initialize()
+    pool: object = field(default=None, repr=False)
 
     @property
     def uptime_str(self) -> str:
@@ -204,7 +206,7 @@ class TelegramCommandServer:
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_allowed(update):
             return
-        await update.message.reply_text("🔍 Checking connections, please wait...")
+        await update.message.reply_text("🔍 Checking status, please wait...")
 
         lines = [
             f"<b>Bet Finder Agent — Status</b>",
@@ -218,28 +220,49 @@ class TelegramCommandServer:
             f"<b>Connection Health:</b>",
         ]
 
-        # Telegram itself
-        lines.append(f"  ✅ Telegram — connected (you sent this command)")
+        # Telegram — already connected since we received the command
+        lines.append(f"  ✅ Telegram — connected")
 
-        # ibetcoin.win
+        # ibetcoin.win — quick HTTP ping (it's a standard ASP.NET page, no Playwright)
         ok, code = await asyncio.get_event_loop().run_in_executor(
             None, lambda: _ping(self.state.ibetcoin_url)
         )
         lines.append(f"  {_ping_label(ok, code)} ibetcoin.win")
 
-        # Each platform
-        PLATFORM_DISPLAY = {
-            "smash66":     ("Smash66",     "https://smash66.com/"),
-            "diamondsb":   ("DiamondSB",   "https://diamondsb.com/"),
-            "sports411":   ("Sports411",   "https://be.sports411.ag/"),
-            "leftcoast797":("Leftcoast797","https://leftcoast797.com/"),
+        # Platform sessions — check REAL login status from the pool
+        pool = self.state.pool
+        PLATFORM_NAMES = {
+            "smash66":     "Smash66",
+            "diamondsb":   "DiamondSB",
+            "sports411":   "Sports411 (proxy)",
+            "leftcoast797":"Leftcoast797",
         }
-        for key, (name, url) in PLATFORM_DISPLAY.items():
-            if key in self.state.platforms_enabled:
-                ok2, code2 = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda u=url: _ping(u)
-                )
-                lines.append(f"  {_ping_label(ok2, code2)} {name}")
+
+        for key, display_name in PLATFORM_NAMES.items():
+            if key not in self.state.platforms_enabled:
+                continue
+
+            if pool is None:
+                # Pool not yet initialized
+                lines.append(f"  ⏳ {display_name} — agent still starting up")
+                continue
+
+            scraper = pool._scrapers.get(key)
+            if scraper is None:
+                # Platform not in pool — login failed at startup
+                lines.append(f"  ❌ {display_name} — not connected (login failed at startup)")
+                continue
+
+            # Check if the browser session is still alive
+            try:
+                alive = await scraper.is_session_alive()
+            except Exception:
+                alive = scraper.is_logged_in
+
+            if alive:
+                lines.append(f"  ✅ {display_name} — logged in (session active)")
+            else:
+                lines.append(f"  ⚠️ {display_name} — session may have expired (will re-login on next bet)")
 
         if self.state.last_error:
             lines += ["", f"⚠️ <b>Last error:</b> {self.state.last_error[:150]}"]

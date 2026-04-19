@@ -281,6 +281,9 @@ async def main():
     if ok == 0:
         console.print("[red]All platform logins failed.[/red]"); sys.exit(1)
 
+    # Give the status command access to real session data
+    state.pool = pool
+
     # ── IMPORTANT: mark ALL currently open bets as already seen ──────────────
     # This ensures we only process BRAND NEW bets from this point forward,
     # not the bets that were already sitting on ibetcoin.win when we started.
