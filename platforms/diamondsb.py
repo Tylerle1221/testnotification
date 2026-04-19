@@ -26,28 +26,34 @@ class DiamondSBScraper(BasePlatformScraper):
 
         logger.info(f"[{self.PLATFORM_NAME}] Logging in...")
         try:
+            # Navigate to the login page. The site may redirect to /#/?expired=true
+            # when a prior session expired — that's fine, the .signin-form is still present.
             await self.safe_goto(self._origin() + "/pla/#/msg")
-            await asyncio.sleep(6)  # Vue.js needs time to initialise on Render
+            await asyncio.sleep(6)
             await self._dismiss_overlays()
 
-            # Vue form: first text input = username, #password-field = password
+            cur_url = self.page.url
+            logger.debug(f"[{self.PLATFORM_NAME}] Pre-login URL: {cur_url}")
+
+            # If the site redirected us to the base domain login, we're still on the right page
+            # Both /pla/#/msg and /#/?expired=true have .signin-form
             user_sel = '.signin-form input[type="text"], .signin-form input:not([type="password"])'
             pass_sel = '#password-field, .signin-form input[type="password"]'
 
             if not await self.safe_fill(user_sel, self.username, timeout=15000):
-                logger.error(f"[{self.PLATFORM_NAME}] Username field not found")
+                logger.error(f"[{self.PLATFORM_NAME}] Username field not found (URL: {self.page.url})")
                 return False
             await self.safe_fill(pass_sel, self.password)
             await asyncio.sleep(0.4)
 
             await self.safe_click('.signin-form button[type="submit"], .signin-form .btn-primary', timeout=8000)
-            await asyncio.sleep(7)  # wait for Vue router to update
+            await asyncio.sleep(7)
 
             self.is_logged_in = await self._verify_login()
             if self.is_logged_in:
                 logger.info(f"[{self.PLATFORM_NAME}] Login successful")
             else:
-                logger.error(f"[{self.PLATFORM_NAME}] Login failed")
+                logger.error(f"[{self.PLATFORM_NAME}] Login failed (URL: {self.page.url}, title: {await self.page.title()})")
             return self.is_logged_in
 
         except Exception as e:

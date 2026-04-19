@@ -93,7 +93,7 @@ class Sports411Scraper(BasePlatformScraper):
             if self.is_logged_in:
                 logger.info(f"[{self.PLATFORM_NAME}] Login successful")
             else:
-                logger.error(f"[{self.PLATFORM_NAME}] Login failed - check credentials")
+                logger.error(f"[{self.PLATFORM_NAME}] Login failed (URL: {self.page.url}, title: {await self.page.title()})")
             return self.is_logged_in
 
         except Exception as e:
