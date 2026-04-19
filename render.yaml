@@ -1,0 +1,41 @@
+﻿services:
+  - type: worker
+    name: bet-finder-agent
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: BET_SPORT
+        value: football
+      - key: BET_EVENT
+        sync: false
+      - key: BET_MARKET
+        value: Moneyline
+      - key: BET_SELECTION
+        value: ""
+      - key: BET_ODDS
+        value: ""
+      - key: SMASH66_USERNAME
+        sync: false
+      - key: SMASH66_PASSWORD
+        sync: false
+      - key: DIAMONDSB_USERNAME
+        sync: false
+      - key: DIAMONDSB_PASSWORD
+        sync: false
+      - key: SPORTS411_USERNAME
+        sync: false
+      - key: SPORTS411_PASSWORD
+        sync: false
+      - key: LEFTCOAST797_USERNAME
+        sync: false
+      - key: LEFTCOAST797_PASSWORD
+        sync: false
+      - key: CHECK_INTERVAL
+        value: "300"
+      - key: SIMILARITY_THRESHOLD
+        value: "75"

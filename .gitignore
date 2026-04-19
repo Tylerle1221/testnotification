@@ -1,0 +1,25 @@
+﻿# Credentials - never commit
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Playwright artifacts
+output/
+snap_*.html
+snap_*.png
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+﻿playwright
+python-telegram-bot>=20.0
+rich
+python-dotenv
+rapidfuzz
+colorama
