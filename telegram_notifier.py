@@ -5,6 +5,7 @@ Handles outbound alerts AND inbound /status and /help commands.
 
 import asyncio
 import logging
+import os
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
@@ -262,15 +263,36 @@ class TelegramCommandServer:
         )
 
     async def start(self):
-        """Build the Application and start polling for commands in background."""
+        """
+        Start the Telegram command server.
+        Uses WEBHOOK mode if WEBHOOK_URL env var is set (faster, real-time).
+        Falls back to polling otherwise.
+        """
         self._app = Application.builder().token(self.bot_token).build()
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
 
         await self._app.initialize()
         await self._app.start()
-        await self._app.updater.start_polling(drop_pending_updates=True)
-        logger.info("Telegram command server started (/status, /help)")
+
+        webhook_url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+        if webhook_url:
+            # ── Webhook mode: Telegram pushes messages to us instantly ──────
+            port = int(os.environ.get("PORT", 10000))
+            hook_url = f"{webhook_url}/telegram"
+            await self._app.updater.start_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path="telegram",
+                webhook_url=hook_url,
+                drop_pending_updates=True,
+                secret_token=None,
+            )
+            logger.info(f"Telegram command server started in WEBHOOK mode → {hook_url}")
+        else:
+            # ── Polling mode: bot checks Telegram every second (fallback) ───
+            await self._app.updater.start_polling(drop_pending_updates=True)
+            logger.info("Telegram command server started in POLLING mode")
 
     async def stop(self):
         if self._app:

@@ -46,6 +46,11 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 # ─── Health server ────────────────────────────────────────────────────────────
 
 def _start_health_server():
+    """Start a minimal HTTP server for Render health checks.
+    Only used when NOT in webhook mode (webhook mode's server already handles the port).
+    """
+    if os.environ.get("WEBHOOK_URL"):
+        return  # webhook server owns the port — no need for a separate health server
     port = int(os.environ.get("PORT", 10000))
 
     class Handler(BaseHTTPRequestHandler):
@@ -98,7 +103,7 @@ def load_config() -> dict:
     a = cfg.setdefault("agent", {})
     if os.environ.get("CHECK_INTERVAL"):
         a["check_interval_seconds"] = int(os.environ["CHECK_INTERVAL"])
-    a.setdefault("check_interval_seconds", 300)
+    a.setdefault("check_interval_seconds", 60)   # default 60s — fast enough for live bets
     a.setdefault("headless", True)
     a.setdefault("odds_tolerance", 0.05)
     a.setdefault("similarity_threshold", 75)
@@ -184,6 +189,7 @@ async def polling_loop(
     pool: PlatformPool,
     notifier: TelegramNotifier,
     state: AgentState,
+    reader: IbetcoinReader,
 ):
     agent_cfg = config.get("agent", {})
     ibet = config.get("ibetcoin", {})
@@ -193,11 +199,6 @@ async def polling_loop(
         odds_tolerance=agent_cfg.get("odds_tolerance", 0.05),
         line_slippage=agent_cfg.get("line_slippage", 1.0),
         juice_slippage=agent_cfg.get("juice_slippage", 20),
-    )
-    reader = IbetcoinReader(
-        username=ibet["username"],
-        password=ibet["password"],
-        headless=agent_cfg.get("headless", True),
     )
 
     interval = agent_cfg.get("check_interval_seconds", 300)
@@ -284,8 +285,28 @@ async def main():
     if ok == 0:
         console.print("[red]All platform logins failed.[/red]"); sys.exit(1)
 
+    # ── IMPORTANT: mark ALL currently open bets as already seen ──────────────
+    # This ensures we only process BRAND NEW bets from this point forward,
+    # not the bets that were already sitting on ibetcoin.win when we started.
+    ibet = config.get("ibetcoin", {})
+    agent_cfg = config.get("agent", {})
+    reader = IbetcoinReader(
+        username=ibet["username"],
+        password=ibet["password"],
+        headless=agent_cfg.get("headless", True),
+    )
+    console.print("[dim]Checking current open bets (marking as already seen)...[/dim]")
+    existing = await reader.fetch_new_bets()  # adds all current IDs to _known_tickets
+    if existing:
+        console.print(
+            f"[dim]Skipped {len(existing)} pre-existing open bet(s) — "
+            f"only NEW bets will trigger alerts.[/dim]"
+        )
+    else:
+        console.print("[dim]No pre-existing open bets. Ready for new bets.[/dim]")
+
     try:
-        await polling_loop(config, pool, notifier, state)
+        await polling_loop(config, pool, notifier, state, reader)
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Stopping...[/yellow]")
         await notifier.notify_agent_stopped("Manual stop")
