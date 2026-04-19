@@ -1,40 +1,36 @@
 ﻿services:
   - type: worker
     name: bet-finder-agent
-    runtime: docker
-    plan: free
-    dockerfilePath: ./Dockerfile
+    runtime: python
+    plan: starter
+    branch: main
+    buildCommand: pip install -r requirements.txt && playwright install chromium --with-deps
+    startCommand: python main.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false
+        value: "8630342198:AAFzFz7xgcvPXd6CEmtrn99oXV0g_SSn0q8"
       - key: TELEGRAM_CHAT_ID
-        sync: false
-      - key: BET_SPORT
-        value: football
-      - key: BET_EVENT
-        sync: false
-      - key: BET_MARKET
-        value: Moneyline
-      - key: BET_SELECTION
-        value: ""
-      - key: BET_ODDS
-        value: ""
+        value: "7046697087"
+      - key: IBETCOIN_USERNAME
+        value: "ibetcoin22"
+      - key: IBETCOIN_PASSWORD
+        value: "ibetcoin31"
       - key: SMASH66_USERNAME
-        sync: false
+        value: "Sg225"
       - key: SMASH66_PASSWORD
-        sync: false
+        value: "ex30"
       - key: DIAMONDSB_USERNAME
-        sync: false
+        value: "Ctr408"
       - key: DIAMONDSB_PASSWORD
-        sync: false
+        value: "222"
       - key: SPORTS411_USERNAME
-        sync: false
+        value: "5164"
       - key: SPORTS411_PASSWORD
-        sync: false
+        value: "Jjjj1234$"
       - key: LEFTCOAST797_USERNAME
-        sync: false
+        value: "Pn440"
       - key: LEFTCOAST797_PASSWORD
-        sync: false
+        value: "kk22"
       - key: CHECK_INTERVAL
         value: "300"
       - key: SIMILARITY_THRESHOLD
