@@ -99,37 +99,32 @@ class V2SportsScraper(BasePlatformScraper):
 
             event_filter = bet.get("event", "").lower()
             matched_links = []
+            unmatched_links = []
 
-            for link in event_links[:30]:
+            for link in event_links[:50]:
                 try:
                     text = (await link.inner_text()).strip()
                     href = await link.get_attribute("href") or ""
                     if not text or not href:
                         continue
 
-                    # If we have a specific event to match, filter
+                    # Check if this event text matches the bet we're looking for
                     if event_filter:
-                        words = [w for w in event_filter.split() if len(w) > 2]
+                        words = [w for w in event_filter.split() if len(w) > 3]
                         if words and any(w in text.lower() for w in words):
                             matched_links.append((text, href))
+                        else:
+                            unmatched_links.append((text, href))
                     else:
                         matched_links.append((text, href))
                 except Exception:
                     pass
 
-            # If no match found by name, take first few events (broad search)
-            if not matched_links:
-                for link in event_links[:5]:
-                    try:
-                        text = (await link.inner_text()).strip()
-                        href = await link.get_attribute("href") or ""
-                        if text and href:
-                            matched_links.append((text, href))
-                    except Exception:
-                        pass
+            # Use matched links first; fall back to first 3 unmatched if no specific match
+            links_to_check = matched_links if matched_links else unmatched_links[:3]
 
             # Click into each matched event to get full odds
-            for event_text, event_href in matched_links[:3]:
+            for event_text, event_href in links_to_check[:5]:
                 try:
                     event_url = self._base_origin() + "/v2/" + event_href
                     await self.safe_goto(event_url)

@@ -77,27 +77,24 @@ class PlatformPool:
         return out
 
     async def _search_one(self, name: str, bet: dict) -> list[dict]:
-        """Search a single platform, re-logging-in if the session expired."""
+        """Search a single platform. Re-logins reactively only on actual failure."""
         scraper = self._scrapers.get(name)
         if not scraper:
             return []
 
         async with self._locks[name]:
-            # Health check: if session expired, re-login
-            if not await scraper.is_session_alive():
-                logger.warning(f"[Pool] {name} session expired — re-logging in...")
-                await scraper.is_logged_in and None  # reset flag
-                scraper.is_logged_in = False
-                logged_in = await scraper.login_with_retry(max_attempts=2)
-                if not logged_in:
-                    logger.error(f"[Pool] {name} re-login failed")
-                    return []
-
             try:
                 candidates = await scraper.search_bets(bet)
                 return candidates
             except Exception as e:
-                logger.error(f"[Pool] search_bets error on {name}: {e}")
+                # search_bets threw — attempt a re-login then retry once
+                logger.warning(f"[Pool] {name} search error ({type(e).__name__}: {e}) — retrying after re-login...")
+                scraper.is_logged_in = False
+                try:
+                    if await scraper.login_with_retry(max_attempts=2):
+                        return await scraper.search_bets(bet)
+                except Exception as e2:
+                    logger.error(f"[Pool] {name} still failing after re-login: {e2}")
                 return []
 
     # ── Internal ──────────────────────────────────────────────────────────────

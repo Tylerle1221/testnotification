@@ -102,34 +102,78 @@ class DiamondSBScraper(BasePlatformScraper):
 
         results = []
         sport = bet.get("sport", "").lower()
+        event = bet.get("event", "").lower()
         try:
             await self.safe_goto(self._origin() + "/pla/#/bet")
-            await asyncio.sleep(6)
+            await asyncio.sleep(4)
             await self._dismiss_overlays()
 
-            # Click into the matching sport category
-            sport_map = {
-                "basketball": ["Basketball", "NBA"],
-                "football": ["Football", "NFL"],
-                "baseball": ["Baseball", "MLB"],
-                "hockey": ["Hockey", "NHL"],
-                "soccer": ["Soccer", "Football"],
-                "tennis": ["Tennis"],
-            }
-            sport_labels = sport_map.get(sport, [sport.title()])
+            # Determine primary sport category
+            if "acb" in event or "spain" in event or any(t in event for t in ["barcelona", "madrid", "lleida"]):
+                primary_sport = "Basketball"
+                subcategory = "Spain ACB"
+            elif any(t in event for t in ["nba", "celtics", "lakers", "warriors", "bulls"]):
+                primary_sport = "Basketball"
+                subcategory = "NBA"
+            elif any(t in event for t in ["bbl", "germany"]):
+                primary_sport = "Basketball"
+                subcategory = "Germany BBL"
+            elif sport == "basketball":
+                primary_sport = "Basketball"
+                subcategory = None
+            elif sport in ("football", "nfl", "ncaa"):
+                primary_sport = "Football"
+                subcategory = None
+            elif sport in ("baseball", "mlb"):
+                primary_sport = "Baseball"
+                subcategory = None
+            elif sport in ("hockey", "nhl"):
+                primary_sport = "Hockey"
+                subcategory = None
+            elif sport == "soccer":
+                primary_sport = "Soccer"
+                subcategory = None
+            else:
+                primary_sport = sport.title()
+                subcategory = None
 
-            for label in sport_labels:
+            async def click_text(text: str) -> bool:
+                """Click any visible element containing this text."""
                 try:
-                    el = await self.page.query_selector(f'text="{label}"')
+                    el = await self.page.query_selector(f'text="{text}"')
                     if el and await el.is_visible():
                         await el.click()
-                        logger.info(f"[{self.PLATFORM_NAME}] Clicked sport category: {label!r}")
-                        await asyncio.sleep(5)
-                        break
+                        return True
                 except Exception:
                     pass
+                # Partial match fallback
+                for sel in ["a", "button", "span[class*='sport']", "div[class*='sport']", "li"]:
+                    try:
+                        els = await self.page.query_selector_all(sel)
+                        for e in els:
+                            try:
+                                if await e.is_visible():
+                                    txt = (await e.inner_text()).strip()
+                                    if text.lower() in txt.lower():
+                                        await e.click()
+                                        return True
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                return False
 
-            # Scrape odds from the page
+            # Click primary sport category
+            if await click_text(primary_sport):
+                logger.info(f"[{self.PLATFORM_NAME}] Clicked: {primary_sport!r}")
+                await asyncio.sleep(4)
+
+                # Click subcategory if needed
+                if subcategory:
+                    if await click_text(subcategory):
+                        logger.info(f"[{self.PLATFORM_NAME}] Clicked subcategory: {subcategory!r}")
+                        await asyncio.sleep(4)
+
             results = await self._scrape_events(bet)
 
         except Exception as e:

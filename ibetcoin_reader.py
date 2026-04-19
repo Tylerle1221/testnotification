@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 OPENBETS_URL = "https://reports.ibetcoin.win/Report/OpenBets.aspx"
 AMERICAN_ODDS_RE = re.compile(r'([+-]\d{3,4})\s*$')
-LINE_RE = re.compile(r'(OVER|UNDER|O|U)\s+(\d+\.?\d*)', re.IGNORECASE)
+LINE_RE = re.compile(r'(OVER|UNDER|O|U)\s*(\d+\.?\d*)', re.IGNORECASE)  # handles "u173" and "OVER 216"
 SPREAD_RE = re.compile(r'([+-]\d+\.?\d*)\s*$')
 TICKET_RE = re.compile(r'Ticket\s*#?(\d+)', re.IGNORECASE)
 RISK_WIN_RE = re.compile(r'(\d[\d,]*)\s*/\s*(\d[\d,]*)')
@@ -120,40 +120,56 @@ def parse_bet_row(row_text: str) -> Optional[OpenBet]:
     bracket_lines = [l for l in lines if re.search(r'\[\d+\]', l)]
     if bracket_lines:
         desc_line = bracket_lines[0]
-        bet.raw_description = desc_line
+        # Strip non-ASCII / corrupt unicode chars that can appear between odds parts
+        desc_clean_raw = re.sub(r'[^\x00-\x7F]+', ' ', desc_line).strip()
+        bet.raw_description = desc_clean_raw
 
-        # Extract odds (American) - last token starting with + or -
-        odds_m = AMERICAN_ODDS_RE.search(desc_line)
+        # Extract American odds — look for -115, +150 etc
+        # Must search AFTER stripping non-ASCII so patterns like u173???-115 → u173 -115
+        odds_m = AMERICAN_ODDS_RE.search(desc_clean_raw)
         if odds_m:
             bet.odds_american = int(odds_m.group(1))
             bet.odds_decimal = _american_to_decimal(bet.odds_american)
 
-        # Strip the bracket ID and odds from description
-        clean = re.sub(r'\[\d+\]', '', desc_line)
-        clean = re.sub(r'[+-]\d{3,4}\s*$', '', clean).strip()
+        # Strip the bracket ID and odds from description for clean text
+        clean = re.sub(r'\[\d+\]', '', desc_clean_raw)
+        clean = re.sub(r'[+-]\d{3,4}(?:\s|$)', '', clean).strip()
         bet.selection = clean
 
-        # Detect Over/Under
+        # Detect Over/Under — handles both "OVER 216" and "u173" (no space)
         line_m = LINE_RE.search(clean)
         if line_m:
             side = line_m.group(1).upper()
             bet.bet_side = "over" if side in ("OVER", "O") else "under"
-            bet.line = float(line_m.group(2))
+            try:
+                bet.line = float(line_m.group(2))
+            except ValueError:
+                pass
             bet.market = f"Total {side.title()} {bet.line}"
         else:
-            # Spread detection
             spread_m = SPREAD_RE.search(clean)
             if spread_m:
                 bet.market = "Spread"
             else:
                 bet.market = "Moneyline"
 
-    # Event: find a non-bracket line that looks like team names or event desc
+    # Event: extract team names from the bracket description (handles "vrs", "vs", "@")
+    if not bet.event and bet.selection:
+        # Look for team match pattern inside parentheses: (TEAM1 vrs/vs/@ TEAM2) (League)
+        paren_m = re.search(r'\(([^)]+(?:vrs?|@|at)[^)]+)\)', bet.selection, re.I)
+        if paren_m:
+            event_raw = paren_m.group(1).strip()
+            # Normalize "vrs" -> "vs"
+            event_raw = re.sub(r'\bvrs?\b', 'vs', event_raw, flags=re.I)
+            # Also grab league if present: (Spain Liga ACB)
+            league_m = re.search(r'\(([^)]+(?:Liga|League|ACB|NBA|NFL|MLB|NHL)[^)]*)\)', bet.selection, re.I)
+            league = f" ({league_m.group(1)})" if league_m else ""
+            bet.event = event_raw + league
+    
     if not bet.event:
         for l in lines:
-            if (re.search(r'\s+(vs\.?|@|at|over|under)\s+', l, re.I)
-                    or re.search(r'[A-Z]{2,}\s+[A-Z]{2,}', l)):
-                bet.event = l
+            if re.search(r'\s+(vrs?|vs\.?|@|at)\s+', l, re.I) or re.search(r'[A-Z]{2,}\s+[A-Z]{2,}', l):
+                bet.event = re.sub(r'\bvrs?\b', 'vs', l, flags=re.I)
                 break
 
     # Fallback: use raw description as event
