@@ -100,12 +100,35 @@ class DiamondSBScraper(BasePlatformScraper):
         results = []
         sport = bet.get("sport", "").lower()
         try:
-            # Navigate to sports section after login
-            sports_url = self._origin() + "/pla/#/sports"
-            await self.safe_goto(sports_url)
-            await asyncio.sleep(4)
+            await self.safe_goto(self._origin() + "/pla/#/bet")
+            await asyncio.sleep(6)
             await self._dismiss_overlays()
+
+            # Click into the matching sport category
+            sport_map = {
+                "basketball": ["Basketball", "NBA"],
+                "football": ["Football", "NFL"],
+                "baseball": ["Baseball", "MLB"],
+                "hockey": ["Hockey", "NHL"],
+                "soccer": ["Soccer", "Football"],
+                "tennis": ["Tennis"],
+            }
+            sport_labels = sport_map.get(sport, [sport.title()])
+
+            for label in sport_labels:
+                try:
+                    el = await self.page.query_selector(f'text="{label}"')
+                    if el and await el.is_visible():
+                        await el.click()
+                        logger.info(f"[{self.PLATFORM_NAME}] Clicked sport category: {label!r}")
+                        await asyncio.sleep(5)
+                        break
+                except Exception:
+                    pass
+
+            # Scrape odds from the page
             results = await self._scrape_events(bet)
+
         except Exception as e:
             logger.error(f"[{self.PLATFORM_NAME}] Search error: {e}")
         return results
@@ -114,9 +137,34 @@ class DiamondSBScraper(BasePlatformScraper):
         results = []
         event_filter = bet.get("event", "").lower()
         try:
+            # First try structured rows
             rows = await self.page.query_selector_all(
-                'tr, [class*="event"], [class*="game"], [class*="match"], [class*="fixture"]'
+                'tr, [class*="event"], [class*="game"], [class*="match"], [class*="fixture"], [class*="bet-row"]'
             )
+
+            # Fallback: scrape from full page text
+            if not rows:
+                page_text = await self.page.inner_text("body")
+                lines = page_text.split("\n")
+                for line in lines[:300]:
+                    if event_filter:
+                        words = [w for w in event_filter.split() if len(w) > 2]
+                        if words and not any(w in line.lower() for w in words):
+                            continue
+                    for odd_str in re.findall(r'([+-]\d{3,4}|\b[12]\.\d{2,3}\b)', line)[:4]:
+                        val = self.normalize_odds(odd_str)
+                        if val and 1.05 < val < 50:
+                            results.append({
+                                "event": line.strip()[:80],
+                                "sport": bet.get("sport", ""),
+                                "market": bet.get("market", ""),
+                                "selection": "",
+                                "odds": val,
+                                "url": self.page.url,
+                            })
+                            break
+                return results
+
             for row in rows[:60]:
                 try:
                     text = (await row.inner_text()).strip()
@@ -126,8 +174,7 @@ class DiamondSBScraper(BasePlatformScraper):
                         words = [w for w in event_filter.split() if len(w) > 2]
                         if words and not any(w in text.lower() for w in words):
                             continue
-                    odds_matches = re.findall(r'([+-]\d{3,4}|\d+\.\d+)', text)
-                    for odd_str in odds_matches[:4]:
+                    for odd_str in re.findall(r'([+-]\d{3,4}|\d+\.\d+)', text)[:4]:
                         val = self.normalize_odds(odd_str)
                         if val and 1.05 < val < 50:
                             results.append({

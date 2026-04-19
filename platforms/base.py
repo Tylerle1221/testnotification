@@ -163,15 +163,40 @@ class BasePlatformScraper(ABC):
             logger.warning(f"[{self.PLATFORM_NAME}] Screenshot failed: {e}")
 
     def normalize_odds(self, raw: str) -> Optional[float]:
-        """Convert odds string (decimal, fractional, american) to decimal float."""
+        """Convert odds string (decimal, fractional, american) to decimal float.
+
+        Handles:
+          American: +150, -110, +700  → decimal equivalent
+          Decimal:  1.85, 2.10        → returned as-is
+          Fractional: 5/2             → decimal equivalent
+        """
+        import re as _re
         if not raw:
             return None
         raw = raw.strip().replace(",", ".")
+
+        # American odds must be detected FIRST (before float() swallows them).
+        # Pattern: optional +/-, exactly 3-4 digits, nothing else.
+        if _re.fullmatch(r'[+-]?\d{3,4}', raw):
+            try:
+                american = int(raw)
+                if american == 0:
+                    return None
+                if american > 0:
+                    return round(american / 100 + 1.0, 3)
+                else:
+                    return round(100 / abs(american) + 1.0, 3)
+            except Exception:
+                pass
+
+        # Decimal odds (e.g. 1.85, 2.10)
         try:
-            # Decimal odds
-            return float(raw)
+            val = float(raw)
+            if 1.01 < val < 100:
+                return round(val, 3)
         except ValueError:
             pass
+
         # Fractional e.g. "5/2"
         if "/" in raw:
             try:
@@ -179,13 +204,5 @@ class BasePlatformScraper(ABC):
                 return round(float(num) / float(den) + 1.0, 3)
             except Exception:
                 pass
-        # American e.g. "+150" or "-110"
-        try:
-            val = int(raw.replace("+", ""))
-            if val > 0:
-                return round(val / 100 + 1.0, 3)
-            else:
-                return round(100 / abs(val) + 1.0, 3)
-        except Exception:
-            pass
+
         return None

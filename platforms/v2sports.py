@@ -1,11 +1,13 @@
 ﻿"""
-V2Sports platform scraper - used by Smash66 and Leftcoast797.
-These sites share the same DGS/pay-per-head platform at /v2/#/sports.
-Login form POSTs to /player-api/identity/CustomerLoginRedir
-"""
+V2Sports platform scraper - DGS pay-per-head platform.
+Used by Smash66 and Leftcoast797.
 
+Sports page: /v2/#/sports  (shows event list with evId links)
+Game odds page: /v2/#/schedule?evId=XXXXXX  (shows full spread/ML/total board)
+"""
 import asyncio
 import logging
+import re
 from .base import BasePlatformScraper
 
 logger = logging.getLogger(__name__)
@@ -16,7 +18,6 @@ class V2SportsScraper(BasePlatformScraper):
     PLATFORM_NAME = "V2Sports"
 
     def _base_origin(self):
-        """Return scheme+host e.g. https://smash66.com"""
         from urllib.parse import urlparse
         p = urlparse(self.url)
         return f"{p.scheme}://{p.netloc}"
@@ -28,24 +29,18 @@ class V2SportsScraper(BasePlatformScraper):
 
         logger.info(f"[{self.PLATFORM_NAME}] Attempting login to {self._base_origin()}...")
         try:
-            login_url = self._base_origin() + "/"
-            await self.safe_goto(login_url)
+            await self.safe_goto(self._base_origin() + "/")
             await asyncio.sleep(3)
             await self._dismiss_overlays()
 
-            # Both Smash66 and Leftcoast797 use customerid / password fields
-            user_filled = await self.safe_fill('#customerid', self.username, timeout=12000)
-            if not user_filled:
-                # Fallback selector
-                user_filled = await self.safe_fill('input[name="customerid"]', self.username, timeout=5000)
-            if not user_filled:
-                logger.error(f"[{self.PLATFORM_NAME}] Username field not found")
-                return False
+            if not await self.safe_fill('#customerid', self.username, timeout=12000):
+                if not await self.safe_fill('input[name="customerid"]', self.username, timeout=5000):
+                    logger.error(f"[{self.PLATFORM_NAME}] Username field not found")
+                    return False
 
             await self.safe_fill('#password', self.password)
             await asyncio.sleep(0.5)
 
-            # Smash66 uses a button; Leftcoast uses input[type=submit]
             clicked = await self.safe_click('input#submit, button[name="button"], .login__submit, .login_btn', timeout=6000)
             if not clicked:
                 await self.page.keyboard.press("Enter")
@@ -55,7 +50,7 @@ class V2SportsScraper(BasePlatformScraper):
             if self.is_logged_in:
                 logger.info(f"[{self.PLATFORM_NAME}] Login successful")
             else:
-                logger.error(f"[{self.PLATFORM_NAME}] Login failed - check credentials")
+                logger.error(f"[{self.PLATFORM_NAME}] Login failed (URL: {self.page.url})")
             return self.is_logged_in
 
         except Exception as e:
@@ -71,21 +66,13 @@ class V2SportsScraper(BasePlatformScraper):
                 pass
 
     async def _verify_login(self) -> bool:
-        """After login the URL changes to /v2/#/sports or balance is shown."""
         cur = self.page.url
         if "sports" in cur or "v2" in cur:
             return True
-        # Check for common post-login elements
-        for sel in [
-            '[class*="balance"]', '[class*="Balance"]',
-            '[class*="account"]', '[class*="logout"]',
-            '.user-info', '#balance'
-        ]:
+        for sel in ['[class*="balance"]', '[class*="Balance"]', '[class*="account"]', '#balance']:
             if await self.wait_for_selector(sel, timeout=2000):
                 return True
-        # If we are past the login page (login form gone), assume success
-        login_still_present = await self.wait_for_selector('#customerid', timeout=1500)
-        return not login_still_present
+        return not await self.wait_for_selector('#customerid', timeout=1500)
 
     async def search_bets(self, bet: dict) -> list[dict]:
         if not self.is_logged_in:
@@ -93,93 +80,70 @@ class V2SportsScraper(BasePlatformScraper):
             return []
 
         results = []
-        sport = bet.get("sport", "").lower()
-
         try:
-            # Navigate to the sports betting page
+            # Load main sports page
             sports_url = self._base_origin() + "/v2/#/sports"
             await self.safe_goto(sports_url)
-            await asyncio.sleep(4)
+            await asyncio.sleep(8)  # DGS loads async
             await self._dismiss_overlays()
 
-            # Navigate to specific sport if possible
-            sport_results = await self._navigate_to_sport(sport)
-            if sport_results:
-                results.extend(sport_results)
-            else:
-                results.extend(await self._scrape_all_games(bet))
+            # Find all game event links on the page
+            event_links = await self.page.query_selector_all("a[href*='schedule'], a[href*='evId']")
+            logger.info(f"[{self.PLATFORM_NAME}] Found {len(event_links)} event links on main page")
 
-        except Exception as e:
-            logger.error(f"[{self.PLATFORM_NAME}] Search error: {e}")
+            event_filter = bet.get("event", "").lower()
+            matched_links = []
 
-        return results
-
-    async def _navigate_to_sport(self, sport: str) -> list[dict]:
-        """Try clicking a sport tab matching the requested sport."""
-        sport_aliases = {
-            "football": ["football", "nfl", "ncaaf", "college football"],
-            "soccer": ["soccer", "football"],
-            "basketball": ["basketball", "nba", "ncaab"],
-            "baseball": ["baseball", "mlb"],
-            "hockey": ["hockey", "nhl"],
-            "tennis": ["tennis"],
-        }
-        aliases = sport_aliases.get(sport, [sport])
-
-        try:
-            sport_links = await self.page.query_selector_all(
-                'a[class*="sport"], button[class*="sport"], [class*="sport-item"], [class*="nav-item"], li a'
-            )
-            for link in sport_links:
-                text = (await link.inner_text()).strip().lower()
-                if any(a in text for a in aliases):
-                    await link.click()
-                    await asyncio.sleep(3)
-                    return await self._scrape_lines_from_page({})
-        except Exception:
-            pass
-        return []
-
-    async def _scrape_all_games(self, bet: dict) -> list[dict]:
-        """Generic fallback: grab all visible odds from the page."""
-        return await self._scrape_lines_from_page(bet)
-
-    async def _scrape_lines_from_page(self, bet: dict) -> list[dict]:
-        results = []
-        event_filter = bet.get("event", "").lower()
-
-        try:
-            await asyncio.sleep(2)
-            # Grab all text content in table rows or game rows
-            rows = await self.page.query_selector_all(
-                'tr[class*="game"], tr[class*="event"], [class*="game-row"], [class*="event-row"], '
-                '[class*="GameRow"], table tbody tr, [class*="matchup"]'
-            )
-            if not rows:
-                # Try a broader selector
-                rows = await self.page.query_selector_all('tbody tr')
-
-            for row in rows[:50]:
+            for link in event_links[:30]:
                 try:
-                    text = await row.inner_text()
-                    text_stripped = text.strip()
-                    if not text_stripped or len(text_stripped) < 5:
+                    text = (await link.inner_text()).strip()
+                    href = await link.get_attribute("href") or ""
+                    if not text or not href:
                         continue
 
-                    # If event filter set, skip non-matching rows
+                    # If we have a specific event to match, filter
                     if event_filter:
                         words = [w for w in event_filter.split() if len(w) > 2]
-                        if words and not any(w in text_stripped.lower() for w in words):
-                            continue
+                        if words and any(w in text.lower() for w in words):
+                            matched_links.append((text, href))
+                    else:
+                        matched_links.append((text, href))
+                except Exception:
+                    pass
 
-                    # Extract odds: look for decimal/american odds patterns
-                    import re
-                    odds_matches = re.findall(r'([+-]\d{3,4}|\d+\.\d+|\b\d{3,4}\b)', text_stripped)
-                    for odd_str in odds_matches[:4]:
+            # If no match found by name, take first few events (broad search)
+            if not matched_links:
+                for link in event_links[:5]:
+                    try:
+                        text = (await link.inner_text()).strip()
+                        href = await link.get_attribute("href") or ""
+                        if text and href:
+                            matched_links.append((text, href))
+                    except Exception:
+                        pass
+
+            # Click into each matched event to get full odds
+            for event_text, event_href in matched_links[:3]:
+                try:
+                    event_url = self._base_origin() + "/v2/" + event_href.lstrip("/")
+                    if "#/" in event_href:
+                        event_url = self._base_origin() + "/v2/" + event_href
+                    elif event_href.startswith("#"):
+                        event_url = self._base_origin() + "/v2/" + event_href
+
+                    await self.safe_goto(event_url)
+                    await asyncio.sleep(5)
+
+                    # Scrape odds from the event page
+                    page_text = await self.page.inner_text("body")
+                    american_odds = re.findall(r'([+-]\d{3,4})', page_text)
+                    decimal_odds = re.findall(r'(\b[12]\.\d{2,3}\b)', page_text)
+
+                    for odd_str in (american_odds + decimal_odds)[:10]:
                         val = self.normalize_odds(odd_str)
-                        if val and 1.05 < val < 50:
+                        if val and 1.05 < val < 30:
                             results.append({
-                                "event": text_stripped.split("\n")[0][:80],
+                                "event": event_text.replace("\n", " ").strip()[:80],
                                 "sport": bet.get("sport", ""),
                                 "market": bet.get("market", ""),
                                 "selection": "",
@@ -187,11 +151,14 @@ class V2SportsScraper(BasePlatformScraper):
                                 "url": self.page.url,
                             })
                             break
-                except Exception:
-                    pass
+
+                    logger.info(f"[{self.PLATFORM_NAME}] Event {event_text.strip()[:40]!r}: {len(american_odds)} American + {len(decimal_odds)} decimal odds")
+
+                except Exception as e:
+                    logger.debug(f"[{self.PLATFORM_NAME}] Error on event {event_text!r}: {e}")
 
         except Exception as e:
-            logger.debug(f"[{self.PLATFORM_NAME}] Scrape page error: {e}")
+            logger.error(f"[{self.PLATFORM_NAME}] Search error: {e}")
 
         return results
 
