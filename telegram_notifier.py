@@ -264,9 +264,13 @@ class TelegramCommandServer:
 
     async def start(self):
         """
-        Start the Telegram command server.
-        Uses WEBHOOK mode if WEBHOOK_URL env var is set (faster, real-time).
-        Falls back to polling otherwise.
+        Start the Telegram command server in polling mode.
+        
+        NOTE on webhooks: Telegram notifications (bet found alerts) are already
+        INSTANT — they're direct API calls, not polling-dependent.
+        Polling here is only for /status and /help commands, which respond in <1s.
+        Webhook mode would require a separate port or integration that conflicts
+        with the health server on Render, so polling is used for reliability.
         """
         self._app = Application.builder().token(self.bot_token).build()
         self._app.add_handler(CommandHandler("status", self._cmd_status))
@@ -274,25 +278,8 @@ class TelegramCommandServer:
 
         await self._app.initialize()
         await self._app.start()
-
-        webhook_url = os.environ.get("WEBHOOK_URL", "").rstrip("/")
-        if webhook_url:
-            # ── Webhook mode: Telegram pushes messages to us instantly ──────
-            port = int(os.environ.get("PORT", 10000))
-            hook_url = f"{webhook_url}/telegram"
-            await self._app.updater.start_webhook(
-                listen="0.0.0.0",
-                port=port,
-                url_path="telegram",
-                webhook_url=hook_url,
-                drop_pending_updates=True,
-                secret_token=None,
-            )
-            logger.info(f"Telegram command server started in WEBHOOK mode → {hook_url}")
-        else:
-            # ── Polling mode: bot checks Telegram every second (fallback) ───
-            await self._app.updater.start_polling(drop_pending_updates=True)
-            logger.info("Telegram command server started in POLLING mode")
+        await self._app.updater.start_polling(drop_pending_updates=True)
+        logger.info("Telegram command server started (/status /help)")
 
     async def stop(self):
         if self._app:

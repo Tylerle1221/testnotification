@@ -46,11 +46,7 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 # ─── Health server ────────────────────────────────────────────────────────────
 
 def _start_health_server():
-    """Start a minimal HTTP server for Render health checks.
-    Only used when NOT in webhook mode (webhook mode's server already handles the port).
-    """
-    if os.environ.get("WEBHOOK_URL"):
-        return  # webhook server owns the port — no need for a separate health server
+    """Start a minimal HTTP server for Render health checks — always runs."""
     port = int(os.environ.get("PORT", 10000))
 
     class Handler(BaseHTTPRequestHandler):
