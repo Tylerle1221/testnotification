@@ -54,15 +54,35 @@ class AgentState:
 # ─── Quick HTTP ping (no browser) ────────────────────────────────────────────
 
 def _ping(url: str, timeout: int = 6) -> tuple[bool, int]:
-    """Returns (reachable, http_status_code)."""
+    """Returns (reachable, http_status_code).
+    Any HTTP response (including 4xx) means the server is up.
+    Only connection errors / timeouts mean it's down.
+    """
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         resp = urllib.request.urlopen(req, timeout=timeout)
         return True, resp.status
     except urllib.error.HTTPError as e:
-        return True, e.code   # site responded (even 4xx = reachable)
+        # 4xx/5xx still means the server responded — site is reachable
+        return True, e.code
     except Exception:
         return False, 0
+
+
+def _ping_label(ok: bool, code: int) -> str:
+    """Human-readable label for a ping result."""
+    if not ok:
+        return "❌ UNREACHABLE"
+    if code == 200:
+        return "✅ Online"
+    if code in (401, 403):
+        # Site is up but blocks simple HTTP pings — that's normal for betting sites
+        return "✅ Online (login required for direct access)"
+    if code in (301, 302, 307, 308):
+        return "✅ Online (redirect)"
+    if code >= 500:
+        return f"⚠️ Server error (HTTP {code})"
+    return f"✅ Online (HTTP {code})"
 
 
 # ─── TelegramNotifier ─────────────────────────────────────────────────────────
@@ -204,8 +224,7 @@ class TelegramCommandServer:
         ok, code = await asyncio.get_event_loop().run_in_executor(
             None, lambda: _ping(self.state.ibetcoin_url)
         )
-        icon = "✅" if ok else "❌"
-        lines.append(f"  {icon} ibetcoin.win — {'reachable' if ok else 'UNREACHABLE'} (HTTP {code})")
+        lines.append(f"  {_ping_label(ok, code)} ibetcoin.win")
 
         # Each platform
         PLATFORM_DISPLAY = {
@@ -219,8 +238,7 @@ class TelegramCommandServer:
                 ok2, code2 = await asyncio.get_event_loop().run_in_executor(
                     None, lambda u=url: _ping(u)
                 )
-                icon2 = "✅" if ok2 else "❌"
-                lines.append(f"  {icon2} {name} — {'reachable' if ok2 else 'UNREACHABLE'} (HTTP {code2})")
+                lines.append(f"  {_ping_label(ok2, code2)} {name}")
 
         if self.state.last_error:
             lines += ["", f"⚠️ <b>Last error:</b> {self.state.last_error[:150]}"]
