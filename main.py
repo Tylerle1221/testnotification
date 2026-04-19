@@ -11,6 +11,8 @@ import os
 import sys
 import time
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
 from rich.console import Console
 from rich.panel import Panel
@@ -234,9 +236,28 @@ async def polling_loop(config: dict, notifier: TelegramNotifier, state: AgentSta
         await asyncio.sleep(interval)
 
 
+# ─── Minimal health server (required for Render web service rolling deploys) ──
+
+def _start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        def log_message(self, *args):
+            pass  # silence access logs
+
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    logger.info(f"Health server listening on port {port}")
+
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 async def main():
+    _start_health_server()
     console.print(Panel.fit(
         "[bold cyan]Bet Finder Agent[/bold cyan]\n"
         "[dim]ibetcoin.win → platforms → Telegram alerts[/dim]",
