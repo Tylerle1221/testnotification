@@ -29,7 +29,10 @@ class DiamondSBScraper(BasePlatformScraper):
             # Navigate to the login page. The site may redirect to /#/?expired=true
             # when a prior session expired — that's fine, the .signin-form is still present.
             await self.safe_goto(self._origin() + "/pla/#/msg")
-            await asyncio.sleep(6)
+            try:
+                await self.page.wait_for_selector('.signin-form input[type="text"]', timeout=10000)
+            except Exception:
+                await asyncio.sleep(6)
             await self._dismiss_overlays()
 
             cur_url = self.page.url

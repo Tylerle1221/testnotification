@@ -37,9 +37,11 @@ class Sports411Scraper(BasePlatformScraper):
         logger.info(f"[{self.PLATFORM_NAME}] Logging in to Sports411 (via proxy)...")
         try:
             await self.safe_goto("https://be.sports411.ag/en/sports/")
-            await asyncio.sleep(12)  # Angular + proxy needs more time to fully render
-
-            # Dismiss outdated-browser warning first (must go before login click)
+            # Wait for the Login button to appear (Angular can take a while)
+            try:
+                await self.page.wait_for_selector("button.login-enter", timeout=15000)
+            except Exception:
+                await asyncio.sleep(12)
             await self._dismiss_overlays()
             await asyncio.sleep(0.5)
 

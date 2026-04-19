@@ -162,6 +162,24 @@ class BasePlatformScraper(ABC):
         except Exception as e:
             logger.warning(f"[{self.PLATFORM_NAME}] Screenshot failed: {e}")
 
+    async def is_session_alive(self) -> bool:
+        """
+        Quick check: is the current browser session still logged in?
+        Returns False if the page shows a login form or the browser is dead.
+        """
+        if not self.is_logged_in or not self.page:
+            return False
+        try:
+            url = self.page.url
+            # If we're already on a login page, session is dead
+            if any(kw in url.lower() for kw in ["login", "default.aspx", "expired", "signout"]):
+                return False
+            # Quick JS eval to confirm page is alive
+            await self.page.evaluate("() => document.title", timeout=3000)
+            return True
+        except Exception:
+            return False
+
     def normalize_odds(self, raw: str) -> Optional[float]:
         """Convert odds string (decimal, fractional, american) to decimal float.
 

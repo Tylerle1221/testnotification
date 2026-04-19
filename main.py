@@ -2,6 +2,11 @@
 Bet Finder Agent - Main orchestrator.
 Reads open bets from ibetcoin.win, searches platforms, sends Telegram alerts.
 Supports /status and /help commands via Telegram.
+
+Speed architecture:
+  - One persistent browser session per platform (login once at startup)
+  - All platforms searched in PARALLEL for each new bet (~15s vs ~3min)
+  - Sessions auto-refresh on expiry
 """
 
 import asyncio
@@ -21,6 +26,7 @@ from rich.logging import RichHandler
 from telegram_notifier import TelegramNotifier, TelegramCommandServer, AgentState
 from bet_matcher import BetMatcher, is_hedge
 from ibetcoin_reader import IbetcoinReader
+from platform_pool import PlatformPool
 from platforms import PLATFORM_MAP
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
@@ -35,6 +41,23 @@ for noisy in ("httpx", "telegram", "playwright", "apscheduler"):
 
 console = Console()
 CONFIG_PATH = Path(__file__).parent / "config.json"
+
+
+# ─── Health server ────────────────────────────────────────────────────────────
+
+def _start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        def log_message(self, *args):
+            pass
+
+    Thread(target=HTTPServer(("0.0.0.0", port), Handler).serve_forever, daemon=True).start()
+    logger.info(f"Health server on port {port}")
 
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -83,7 +106,6 @@ def load_config() -> dict:
     a.setdefault("juice_slippage", 20)
     a.setdefault("notify_on_exact", True)
     a.setdefault("notify_on_similar", True)
-
     return cfg
 
 
@@ -94,80 +116,75 @@ def get_enabled_platforms(config: dict) -> list[str]:
     ]
 
 
-# ─── Core search ─────────────────────────────────────────────────────────────
+# ─── Core search — parallel across all platforms ──────────────────────────────
 
-async def search_bet_on_platforms(
+async def process_bet(
     bet: dict,
-    platforms: list[str],
-    config: dict,
+    pool: PlatformPool,
     notifier: TelegramNotifier,
     matcher: BetMatcher,
     all_open_bets: list[dict],
     state: AgentState,
+    cfg: dict,
 ) -> int:
-    agent_cfg = config.get("agent", {})
-    headless = agent_cfg.get("headless", True)
+    agent_cfg = cfg.get("agent", {})
     notify_exact = agent_cfg.get("notify_on_exact", True)
     notify_similar = agent_cfg.get("notify_on_similar", True)
-    total = 0
+    total_matches = 0
 
-    for platform_name in platforms:
-        PlatformClass = PLATFORM_MAP[platform_name]
-        platform_cfg = config["platforms"][platform_name]
-        scraper = PlatformClass(platform_cfg, headless=headless)
+    side_str = ""
+    if bet.get("bet_side") and bet.get("line"):
+        side_str = f" {bet['bet_side'].upper()} {bet['line']}"
+    odds_str = str(bet.get("odds_american") or bet.get("odds") or "")
+    console.print(
+        f"  [cyan]Searching:[/cyan] [{bet.get('sport','')}] [bold]{bet.get('event','?')[:55]}[/bold]"
+        f"{side_str}  odds={odds_str}  ticket={bet.get('ticket_id')}"
+    )
 
-        console.print(f"  [cyan]→ {scraper.PLATFORM_NAME}[/cyan]", end="")
+    t0 = time.time()
+    # Search ALL platforms in parallel — the big speed win
+    results_by_platform = await pool.search_all_parallel(bet)
+    elapsed = time.time() - t0
+    console.print(f"  [dim]Parallel search complete in {elapsed:.1f}s[/dim]")
 
-        try:
-            if not await scraper.start():
-                console.print(" [red]browser failed[/red]")
+    for platform_name, candidates in results_by_platform.items():
+        if not candidates:
+            continue
+
+        matches = matcher.filter_results(bet, candidates)
+        console.print(f"  [{platform_name}] {len(candidates)} candidates → [yellow]{len(matches)} matches[/yellow]")
+
+        for match in matches:
+            total_matches += 1
+            state.total_matches_found += 1
+            score = match["similarity_score"]
+
+            if is_hedge(all_open_bets, match, same_account=True):
+                console.print(f"    [dim]↳ hedge detected, skipping[/dim]")
                 continue
-            if not await scraper.login_with_retry(max_attempts=2):
-                console.print(" [red]login failed[/red]")
-                state.last_error = f"{scraper.PLATFORM_NAME}: login failed"
-                await notifier.notify_error(scraper.PLATFORM_NAME, "Login failed")
-                continue
 
-            candidates = await scraper.search_bets(bet)
-            matches = matcher.filter_results(bet, candidates)
+            label = "EXACT" if match["is_exact"] else f"SIMILAR ({score:.0f}%)"
             console.print(
-                f" [dim]{len(candidates)} candidates[/dim] → [yellow]{len(matches)} matches[/yellow]"
+                f"    [bold green]{label}[/bold green] on [bold]{platform_name}[/bold]: "
+                f"{match.get('event','?')[:50]} | odds={match.get('odds')}"
             )
 
-            for match in matches:
-                total += 1
-                state.total_matches_found += 1
-                score = match["similarity_score"]
+            if match["is_exact"] and notify_exact:
+                await notifier.notify_exact_match(platform_name, bet, match)
+            elif match["is_similar"] and not match["is_exact"] and notify_similar:
+                await notifier.notify_similar_match(platform_name, bet, match, score)
 
-                if is_hedge(all_open_bets, match, same_account=True):
-                    console.print("  [dim]↳ hedge detected, skipping[/dim]")
-                    continue
-
-                label = "EXACT" if match["is_exact"] else f"SIMILAR ({score:.0f}%)"
-                console.print(
-                    f"  [bold green]{label}[/bold green]: "
-                    f"{match.get('event','?')[:60]} | odds={match.get('odds')}"
-                )
-
-                if match["is_exact"] and notify_exact:
-                    await notifier.notify_exact_match(scraper.PLATFORM_NAME, bet, match)
-                elif match["is_similar"] and not match["is_exact"] and notify_similar:
-                    await notifier.notify_similar_match(scraper.PLATFORM_NAME, bet, match, score)
-
-        except Exception as e:
-            msg = str(e)
-            state.last_error = f"{platform_name}: {msg[:100]}"
-            logger.error(f"Error on {platform_name}: {e}")
-            await notifier.notify_error(platform_name, msg)
-        finally:
-            await scraper.stop()
-
-    return total
+    return total_matches
 
 
-# ─── Main polling loop ────────────────────────────────────────────────────────
+# ─── Main loop ────────────────────────────────────────────────────────────────
 
-async def polling_loop(config: dict, notifier: TelegramNotifier, state: AgentState):
+async def polling_loop(
+    config: dict,
+    pool: PlatformPool,
+    notifier: TelegramNotifier,
+    state: AgentState,
+):
     agent_cfg = config.get("agent", {})
     ibet = config.get("ibetcoin", {})
 
@@ -183,24 +200,23 @@ async def polling_loop(config: dict, notifier: TelegramNotifier, state: AgentSta
         headless=agent_cfg.get("headless", True),
     )
 
-    enabled_platforms = get_enabled_platforms(config)
-    state.platforms_enabled = enabled_platforms
-
     interval = agent_cfg.get("check_interval_seconds", 300)
-    console.print(
-        f"\n[bold green]Agent running[/bold green] — polling ibetcoin every {interval}s\n"
-        f"Platforms: {', '.join(enabled_platforms)}\n"
-        f"Slippage: line±{agent_cfg['line_slippage']}pt, juice±{agent_cfg['juice_slippage']}\n"
-        f"Commands: /status, /help\n"
-    )
+    active = pool.platform_names()
 
-    await notifier.notify_agent_started(enabled_platforms)
+    console.print(
+        f"\n[bold green]Agent running[/bold green]\n"
+        f"  Platforms ready: {', '.join(active)}\n"
+        f"  ibetcoin poll interval: {interval}s\n"
+        f"  Slippage: line±{agent_cfg['line_slippage']}pt, juice±{agent_cfg['juice_slippage']}\n"
+        f"  Search mode: [bold cyan]PARALLEL[/bold cyan] (all platforms at once)\n"
+    )
+    state.platforms_enabled = active
+    await notifier.notify_agent_started(active)
 
     while True:
         state.total_cycles += 1
-        state.last_cycle_at = __import__("datetime").datetime.now(
-            __import__("datetime").timezone.utc
-        )
+        from datetime import datetime, timezone
+        state.last_cycle_at = datetime.now(timezone.utc)
         console.rule(f"[dim]Cycle #{state.total_cycles} — {time.strftime('%H:%M:%S')}[/dim]")
 
         console.print("[dim]Fetching open bets from ibetcoin.win...[/dim]")
@@ -208,50 +224,22 @@ async def polling_loop(config: dict, notifier: TelegramNotifier, state: AgentSta
         new_bets = await reader.fetch_new_bets()
         state.total_bets_scraped += len(new_bets)
 
-        console.print(
-            f"[dim]Total open: {len(all_bets)} | New this cycle: {len(new_bets)}[/dim]"
-        )
+        console.print(f"[dim]Total open: {len(all_bets)} | New this cycle: {len(new_bets)}[/dim]")
 
         if not new_bets:
             console.print("[dim]No new bets to process[/dim]")
         else:
             await notifier.notify_new_bets_found(new_bets)
-            for i, bet in enumerate(new_bets, 1):
-                side = bet.get("bet_side", "")
-                line_str = f" {side.upper()} {bet.get('line')}" if side and bet.get("line") else ""
-                console.print(
-                    f"  [cyan]#{i}[/cyan] [{bet.get('sport','')}] "
-                    f"[bold]{bet.get('event','?')[:60]}[/bold]"
-                    f"{line_str}  odds={bet.get('odds_american') or bet.get('odds')}"
-                    f"  [dim]ticket={bet.get('ticket_id')}[/dim]"
-                )
-                console.print(f"  Searching {len(enabled_platforms)} platforms...")
-                found = await search_bet_on_platforms(
-                    bet, enabled_platforms, config, notifier, matcher, all_bets, state
+
+            for bet in new_bets:
+                found = await process_bet(
+                    bet, pool, notifier, matcher, all_bets, state, config
                 )
                 if found == 0:
-                    console.print("  [dim]No matches found[/dim]")
+                    console.print("  [dim]No matches found on any platform[/dim]")
 
         console.print(f"[dim]Next check in {interval}s...[/dim]")
         await asyncio.sleep(interval)
-
-
-# ─── Minimal health server (required for Render web service rolling deploys) ──
-
-def _start_health_server():
-    port = int(os.environ.get("PORT", 10000))
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        def log_message(self, *args):
-            pass  # silence access logs
-
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    Thread(target=server.serve_forever, daemon=True).start()
-    logger.info(f"Health server listening on port {port}")
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
@@ -260,26 +248,23 @@ async def main():
     _start_health_server()
     console.print(Panel.fit(
         "[bold cyan]Bet Finder Agent[/bold cyan]\n"
-        "[dim]ibetcoin.win → platforms → Telegram alerts[/dim]",
+        "[dim]ibetcoin.win → parallel platform search → Telegram alerts[/dim]",
         border_style="cyan"
     ))
 
     config = load_config()
-
     tg = config.get("telegram", {})
-    if not tg.get("bot_token"):
-        console.print("[red]TELEGRAM_BOT_TOKEN not set.[/red]")
-        sys.exit(1)
-    if not tg.get("chat_id"):
-        console.print("[red]TELEGRAM_CHAT_ID not set. Run setup_telegram.py first.[/red]")
-        sys.exit(1)
-    if not config.get("ibetcoin", {}).get("username"):
-        console.print("[red]IBETCOIN_USERNAME not set.[/red]")
-        sys.exit(1)
 
-    if not get_enabled_platforms(config):
-        console.print("[red]No platforms enabled.[/red]")
-        sys.exit(1)
+    if not tg.get("bot_token"):
+        console.print("[red]TELEGRAM_BOT_TOKEN not set.[/red]"); sys.exit(1)
+    if not tg.get("chat_id"):
+        console.print("[red]TELEGRAM_CHAT_ID not set. Run setup_telegram.py first.[/red]"); sys.exit(1)
+    if not config.get("ibetcoin", {}).get("username"):
+        console.print("[red]IBETCOIN_USERNAME not set.[/red]"); sys.exit(1)
+
+    enabled_platforms = get_enabled_platforms(config)
+    if not enabled_platforms:
+        console.print("[red]No platforms enabled.[/red]"); sys.exit(1)
 
     state = AgentState()
     notifier = TelegramNotifier(tg["bot_token"], tg["chat_id"])
@@ -289,16 +274,24 @@ async def main():
     console.print("[dim]Testing Telegram...[/dim]")
     await notifier.test_connection()
 
-    # Start the command listener (background)
+    # Start command listener
     await cmd_server.start()
 
+    # Initialize platform pool — login ONCE, keep browsers alive
+    pool = PlatformPool(config)
+    console.print(f"[dim]Starting browsers and logging in to {len(enabled_platforms)} platforms...[/dim]")
+    ok = await pool.initialize(enabled_platforms)
+    if ok == 0:
+        console.print("[red]All platform logins failed.[/red]"); sys.exit(1)
+
     try:
-        await polling_loop(config, notifier, state)
+        await polling_loop(config, pool, notifier, state)
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Stopping...[/yellow]")
         await notifier.notify_agent_stopped("Manual stop")
     finally:
         await cmd_server.stop()
+        await pool.shutdown()
 
 
 if __name__ == "__main__":

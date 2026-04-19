@@ -84,7 +84,13 @@ class V2SportsScraper(BasePlatformScraper):
             # Load main sports page
             sports_url = self._base_origin() + "/v2/#/sports"
             await self.safe_goto(sports_url)
-            await asyncio.sleep(8)  # DGS loads async
+            # Wait for event links to appear instead of fixed sleep
+            try:
+                await self.page.wait_for_selector(
+                    "a[href*='schedule'], a[href*='evId']", timeout=10000
+                )
+            except Exception:
+                await asyncio.sleep(5)  # fallback
             await self._dismiss_overlays()
 
             # Find all game event links on the page
@@ -125,14 +131,15 @@ class V2SportsScraper(BasePlatformScraper):
             # Click into each matched event to get full odds
             for event_text, event_href in matched_links[:3]:
                 try:
-                    event_url = self._base_origin() + "/v2/" + event_href.lstrip("/")
-                    if "#/" in event_href:
-                        event_url = self._base_origin() + "/v2/" + event_href
-                    elif event_href.startswith("#"):
-                        event_url = self._base_origin() + "/v2/" + event_href
-
+                    event_url = self._base_origin() + "/v2/" + event_href
                     await self.safe_goto(event_url)
-                    await asyncio.sleep(5)
+                    # Wait for odds to appear on the event page
+                    try:
+                        await self.page.wait_for_function(
+                            "() => document.body.innerText.match(/[+-]\\d{3,4}/)", timeout=6000
+                        )
+                    except Exception:
+                        await asyncio.sleep(4)
 
                     # Scrape odds from the event page
                     page_text = await self.page.inner_text("body")
